@@ -5,6 +5,7 @@ CLI-обёртка для macOS Shortcuts.
     python -m lecturer start --source screen   # запускает запись в текущем процессе
     python -m lecturer start --source both &   # то же самое, но в фоне (как вызывает Shortcut)
     python -m lecturer stop                    # шлёт SIGINT фоновому процессу
+    python -m lecturer test-export             # суммаризация + экспорт без записи (отладка)
 
 Start-shortcut в Shortcuts.app: действие "Run Shell Script"
     /usr/bin/env python3 -m lecturer start --source screen &
@@ -26,6 +27,14 @@ import sys
 from lecturer.audio.capture import AudioSourceMode
 from lecturer.orchestrator import Pipeline
 from lecturer.session import send_stop_signal
+
+_SAMPLE_TRANSCRIPT = """\
+[00:00] Сегодня поговорим про алгоритмы сортировки.
+[00:05] Начнём с сортировки пузырьком — она простая, но медленная: O(n в квадрате).
+[00:12] Быстрая сортировка в среднем работает за O(n log n), но в худшем случае деградирует до O(n в квадрате).
+[00:20] Сортировка слиянием стабильна и гарантированно работает за O(n log n), но требует дополнительной памяти.
+[00:28] На практике для небольших массивов часто используют insertion sort как базовый случай в гибридных алгоритмах.
+"""
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -66,6 +75,34 @@ def cmd_stop(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test_export(args: argparse.Namespace) -> int:
+    """
+    Отладочная команда: пропускает запись/транскрибацию. Берёт готовый
+    транскрипт (--transcript-file) или встроенный тестовый текст,
+    прогоняет суммаризацию и (если не --skip-anytype) экспорт в Anytype —
+    удобно быстро проверить формат Lecture Note без реальной записи.
+    """
+
+    if args.transcript_file:
+        transcript_text = open(args.transcript_file, encoding="utf-8").read()
+    else:
+        transcript_text = _SAMPLE_TRANSCRIPT
+        print("Используется встроенный тестовый транскрипт (--transcript-file не указан).")
+
+    pipeline = Pipeline(source_mode=AudioSourceMode(args.source))
+    session = pipeline.run_from_existing_transcript(
+        transcript_text,
+        duration_sec=args.duration,
+        skip_export=args.skip_anytype,
+    )
+
+    print(f"Транскрипт: {session.transcript_path}")
+    print(f"Конспект:   {session.summary_path}")
+    if not args.skip_anytype:
+        print(f"Лог MCP:    {session.mcp_log_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     # -v нужен и до, и после подкоманды: "lecturer -v start" и
     # "lecturer start -v" — оба привычны, поэтому флаг регистрируется
@@ -88,6 +125,35 @@ def build_parser() -> argparse.ArgumentParser:
     stop = sub.add_parser("stop", help="остановить текущую запись", parents=[verbose_parent])
     stop.set_defaults(func=cmd_stop)
 
+    test_export = sub.add_parser(
+        "test-export",
+        help="отладка: суммаризация + экспорт в Anytype без записи/транскрибации",
+        parents=[verbose_parent],
+    )
+    test_export.add_argument(
+        "--transcript-file",
+        default=None,
+        help="путь к готовому транскрипту (.md/.txt); без него — встроенный тестовый текст",
+    )
+    test_export.add_argument(
+        "--source",
+        choices=[m.value for m in AudioSourceMode],
+        default="screen",
+        help="значение для свойства Audio Source (по умолчанию screen)",
+    )
+    test_export.add_argument(
+        "--duration",
+        type=float,
+        default=300.0,
+        help="значение для свойства Duration в секундах (по умолчанию 300)",
+    )
+    test_export.add_argument(
+        "--skip-anytype",
+        action="store_true",
+        help="только суммаризация, без обращения к Anytype",
+    )
+    test_export.set_defaults(func=cmd_test_export)
+
     return parser
 
 
@@ -100,3 +166,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

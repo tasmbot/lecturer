@@ -44,11 +44,39 @@ class Pipeline:
         try:
             self._run_transcription()
             self._run_summarization()
+            self.session.archive_outputs()
             self._run_export()
         finally:
             self.session.save_meta()
             self.lock.release()
 
+        logger.info("Готово. Результаты: %s", self.session.root)
+        return self.session
+
+    def run_from_existing_transcript(
+        self,
+        transcript_text: str,
+        duration_sec: float = 0.0,
+        skip_export: bool = False,
+    ) -> Session:
+        """
+        Для отладки: пропускает запись и транскрибацию, сразу суммаризирует
+        готовый текст и (если не skip_export) шлёт в Anytype. Удобно быстро
+        погонять формат Lecture Note без реальной записи лекции каждый раз.
+        Не требует lock/pid — это не "настоящая" фоновая сессия записи.
+        """
+
+        self.session.transcript_path.write_text(transcript_text, encoding="utf-8")
+        self.session.meta.duration_sec = duration_sec
+        self.session.meta.segments_count = transcript_text.count("\n") + 1
+
+        self._run_summarization()
+        self.session.archive_outputs()
+
+        if not skip_export:
+            self._run_export()
+
+        self.session.save_meta()
         logger.info("Готово. Результаты: %s", self.session.root)
         return self.session
 
@@ -90,7 +118,14 @@ class Pipeline:
 
         exporter = AnytypeExporter()
         try:
-            asyncio.run(exporter.export_markdown(self.session.summary_path, properties=properties))
+            asyncio.run(
+                exporter.export_markdown(
+                    self.session.summary_path,
+                    transcript_path=self.session.transcript_path,
+                    properties=properties,
+                    log_file=self.session.mcp_log_path,
+                )
+            )
         except Exception as e:
             # Экспорт — последний шаг: если он падает (нет сети, не настроен
             # Anytype), локальный summary.md всё равно остаётся на диске.

@@ -15,6 +15,7 @@ summarize_text ниже.
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import time
 
@@ -69,11 +70,14 @@ class OllamaClient:
 
     def generate(self, prompt: str, model_name: str | None = None) -> str:
         """
-        Один запрос к Ollama (без стриминга в консоль — используется внутри
-        пайплайна, где нам нужен только финальный текст). При сетевых
-        ошибках/таймауте делает до cfg.max_retries повторов с экспоненциальной
-        паузой, и только после исчерпания попыток возвращает исходный prompt
-        как деградированный fallback, чтобы не терять данные целиком.
+        Запрос к Ollama со стримингом ответа в консоль (как было в исходном
+        ноутбуке) — по мере генерации токены печатаются в stdout, а полный
+        текст всё равно собирается и возвращается целиком. Стриминг можно
+        выключить через LECTURER_OLLAMA_STREAM_OUTPUT=false.
+
+        При сетевых ошибках/таймауте делает до cfg.max_retries повторов с
+        экспоненциальной паузой; если все попытки исчерпаны — пробрасывает
+        исключение (вызывающий код сам решает, чем заменить результат).
         """
 
         model = model_name or self.cfg.model_name
@@ -81,21 +85,7 @@ class OllamaClient:
 
         for attempt in range(1, self.cfg.max_retries + 2):
             try:
-                response = requests.post(
-                    self.cfg.url,
-                    json={
-                        "model": model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "think": self.cfg.think,
-                        "options": {"temperature": self.cfg.temperature},
-                    },
-                    timeout=self.cfg.timeout,
-                )
-                response.raise_for_status()
-                data = response.json()
-                text = data.get("response", "").strip()
-
+                text = self._generate_once(prompt, model)
                 if not text:
                     logger.warning("Ollama вернула пустой ответ (попытка %s).", attempt)
                     last_error = RuntimeError("empty response")
@@ -117,8 +107,56 @@ class OllamaClient:
                 logger.info("Повтор через %s сек...", backoff)
                 time.sleep(backoff)
 
-        logger.error("Ollama недоступна после %s попыток, возвращаю исходный текст без обработки.", self.cfg.max_retries + 1)
+        logger.error("Ollama недоступна после %s попыток.", self.cfg.max_retries + 1)
         raise last_error or RuntimeError("Ollama request failed")
+
+    def _generate_once(self, prompt: str, model: str) -> str:
+        if not self.cfg.stream_output:
+            response = requests.post(
+                self.cfg.url,
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "think": self.cfg.think,
+                    "options": {"temperature": self.cfg.temperature},
+                },
+                timeout=self.cfg.timeout,
+            )
+            response.raise_for_status()
+            return response.json().get("response", "").strip()
+
+        # Стриминговый режим: сервер шлёт по одной JSON-строке на токен/чанк
+        # (формат Ollama /api/generate с stream=true). Печатаем в консоль
+        # по мере поступления и одновременно собираем полный текст.
+        response = requests.post(
+            self.cfg.url,
+            json={
+                "model": model,
+                "prompt": prompt,
+                "stream": True,
+                "think": self.cfg.think,
+                "options": {"temperature": self.cfg.temperature},
+            },
+            timeout=self.cfg.timeout,
+            stream=True,
+        )
+        response.raise_for_status()
+
+        chunks: list[str] = []
+        for line in response.iter_lines():
+            if not line:
+                continue
+            piece = _json.loads(line)
+            token = piece.get("response", "")
+            if token:
+                print(token, end="", flush=True)
+                chunks.append(token)
+            if piece.get("done"):
+                break
+
+        print()  # перевод строки после стрима одного чанка
+        return "".join(chunks).strip()
 
 
 def summarize_text(
