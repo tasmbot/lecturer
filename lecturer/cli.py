@@ -20,11 +20,11 @@ Stop-shortcut: действие "Run Shell Script"
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
 import logging
 import signal
 import sys
-import asyncio
-import json
 
 from lecturer.audio.capture import AudioSourceMode
 from lecturer.orchestrator import Pipeline
@@ -37,7 +37,6 @@ _SAMPLE_TRANSCRIPT = """\
 [00:20] Сортировка слиянием стабильна и гарантированно работает за O(n log n), но требует дополнительной памяти.
 [00:28] На практике для небольших массивов часто используют insertion sort как базовый случай в гибридных алгоритмах.
 """
-
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -76,6 +75,7 @@ def cmd_stop(_args: argparse.Namespace) -> int:
         return 1
     print("Сигнал остановки отправлен, пайплайн завершает суммаризацию и экспорт...")
     return 0
+
 
 async def _list_tags_async(prop_key: str) -> None:
     """
@@ -168,6 +168,111 @@ def cmd_list_tags(args: argparse.Namespace) -> int:
     asyncio.run(_list_tags_async(args.property))
     return 0
 
+
+async def _list_templates_async(type_key: str) -> None:
+    """
+    Получает шаблоны типа через двухшаговый запрос:
+    1. API-list-types -> находим type_id по type_key
+    2. API-list-templates с type_id -> список шаблонов
+
+    Заодно проверяет, поддерживает ли API-create-object параметр template_id.
+    """
+
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    from lecturer.config import settings
+
+    cfg = settings.anytype
+    if not cfg.api_key or not cfg.space_id:
+        print("Ошибка: ANYTYPE_API_KEY / ANYTYPE_SPACE_ID не заданы в .env")
+        return
+
+    headers = json.dumps({
+        "Authorization": f"Bearer {cfg.api_key}",
+        "Anytype-Version": cfg.api_version,
+    })
+    server_params = StdioServerParameters(
+        command="npx",
+        args=["-y", "@anyproto/anytype-mcp"],
+        env={**__import__("os").environ, "OPENAPI_MCP_HEADERS": headers},
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # 1. Проверяем схему API-create-object — есть ли там template_id
+            tools_result = await session.list_tools()
+            create_tool = next(
+                (t for t in tools_result.tools if t.name == "API-create-object"), None
+            )
+            if create_tool:
+                schema_props = (create_tool.input_schema or {}).get("properties", {})
+                if "template_id" in schema_props:
+                    print("✓ API-create-object поддерживает template_id")
+                else:
+                    print("✗ API-create-object НЕ имеет параметра template_id в схеме")
+                    print(f"  Доступные параметры: {list(schema_props.keys())}")
+            print()
+
+            # 2. Получаем type_id — list-templates требует id, а не key
+            types_result = await session.call_tool(
+                "API-list-types",
+                arguments={"space_id": cfg.space_id, "limit": 100},
+            )
+            raw = types_result.content[0].text if types_result.content else "{}"
+            types_data = json.loads(raw)
+            types = types_data.get("data", [])
+
+            target_type = next(
+                (t for t in types
+                 if t.get("key", "").lower() == type_key.lower()
+                 or t.get("name", "").lower() == type_key.lower()),
+                None,
+            )
+            if not target_type:
+                available = [f"{t.get('key')} ({t.get('name')})" for t in types]
+                print(f"Тип '{type_key}' не найден. Доступные типы:")
+                for a in available:
+                    print(f"  {a}")
+                return
+
+            type_id = target_type.get("id")
+            print(f"Тип: {target_type.get('name')} | key={target_type.get('key')} | id={type_id}")
+            print()
+
+            # 3. Получаем шаблоны этого типа
+            templates_result = await session.call_tool(
+                "API-list-templates",
+                arguments={"space_id": cfg.space_id, "type_id": type_id, "limit": 50},
+            )
+            raw = templates_result.content[0].text if templates_result.content else "{}"
+            data = json.loads(raw)
+
+            if data.get("object") == "error":
+                print(f"Ошибка: {data.get('message')}")
+                return
+
+            templates = data.get("data", [])
+            if not templates:
+                print(f"Шаблонов для типа '{type_key}' не найдено.")
+                print("Создайте шаблон: откройте тип в Anytype → Templates → New template.")
+                return
+
+            print(f"{'ID':<50} NAME")
+            print("-" * 80)
+            for t in templates:
+                print(f"{t.get('id',''):<50} {t.get('name','(без названия)')}")
+
+            print(f"\nДобавьте в .env: ANYTYPE_TEMPLATE_ID=<id нужного шаблона>")
+
+
+def cmd_list_templates(args: argparse.Namespace) -> int:
+    asyncio.run(_list_templates_async(args.type_key))
+    return 0
+
+
 def cmd_test_export(args: argparse.Namespace) -> int:
     """
     Отладочная команда: пропускает запись/транскрибацию. Берёт готовый
@@ -193,6 +298,22 @@ def cmd_test_export(args: argparse.Namespace) -> int:
     print(f"Конспект:   {session.summary_path}")
     if not args.skip_anytype:
         print(f"Лог MCP:    {session.mcp_log_path}")
+    return 0
+
+
+def cmd_inspect_anytype(args: argparse.Namespace) -> int:
+    """
+    Печатает properties пространства Anytype и теги (id/key/name) их
+    select/multi_select-свойств — чтобы узнать точные значения, которые
+    нужно слать в multi_select (должны совпасть с tag key или name).
+    """
+
+    import asyncio
+
+    from lecturer.export.anytype_client import AnytypeExporter
+
+    exporter = AnytypeExporter()
+    asyncio.run(exporter.inspect_schema(type_key=args.type_key))
     return 0
 
 
@@ -231,6 +352,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     list_tags.set_defaults(func=cmd_list_tags)
 
+    list_templates = sub.add_parser(
+        "list-templates",
+        help="показать шаблоны типа Anytype и проверить поддержку template_id",
+        parents=[verbose_parent],
+    )
+    list_templates.add_argument(
+        "--type-key",
+        default="lecture_note",
+        help="type_key для которого искать шаблоны (по умолчанию lecture_note)",
+    )
+    list_templates.set_defaults(func=cmd_list_templates)
+
     test_export = sub.add_parser(
         "test-export",
         help="отладка: суммаризация + экспорт в Anytype без записи/транскрибации",
@@ -260,6 +393,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_export.set_defaults(func=cmd_test_export)
 
+    inspect_anytype = sub.add_parser(
+        "inspect-anytype",
+        help="показать properties и теги вашего пространства Anytype",
+        parents=[verbose_parent],
+    )
+    inspect_anytype.add_argument(
+        "--type-key",
+        default="lecture_note",
+        help="type_key, для которого дополнительно показать сведения о типе (по умолчанию lecture_note)",
+    )
+    inspect_anytype.set_defaults(func=cmd_inspect_anytype)
+
     return parser
 
 
@@ -272,4 +417,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

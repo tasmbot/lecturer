@@ -229,6 +229,8 @@ class AnytypeExporter:
         }
         if api_properties:
             args["properties"] = api_properties
+        if self.cfg.template_id and self.cfg.type_key != "page":
+            args["template_id"] = self.cfg.template_id
 
         try:
             result = await session.call_tool("API-create-object", arguments=args)

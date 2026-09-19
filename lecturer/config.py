@@ -121,6 +121,10 @@ class AnytypeConfig:
     # по стандартным портам (127.0.0.1:31007, 31009).
     api_base_url: str = _env("ANYTYPE_API_BASE_URL", "")
 
+    # ID шаблона для создания объектов типа lecture_note.
+    # Узнать: python -m lecturer list-templates
+    template_id: str = _env("ANYTYPE_TEMPLATE_ID", "")
+
     # Куда девать болтливые stderr-логи процесса `npx @anyproto/anytype-mcp`
     # (он при старте печатает полный реестр инструментов) — по умолчанию в
     # файл рядом с сессией, а не в терминал.
