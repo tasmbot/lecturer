@@ -141,63 +141,84 @@ class AnytypeExporter:
 
     async def _upload_file(self, session, file_path: Path) -> str | None:
         """
-        Загружает файл через сгенерированный из OpenAPI MCP-инструмент.
-        Точная схема аргументов этого инструмента не документирована
-        публично, поэтому: 1) находим инструмент по имени/пути, 2) логируем
-        его input_schema (для отладки, в тот же файл, что и errlog),
-        3) пробуем несколько правдоподобных наборов аргументов по очереди.
-        Если ни один не сработал — пропускаем прикрепление файла, не роняя
-        весь экспорт целиком.
+        Локальный Anytype не имеет облачного REST API — вместо этого
+        MCP-сервер сам знает локальный порт и ходит туда напрямую.
+        Пробуем стандартные локальные порты Anytype desktop (31007, 31009)
+        и шлём multipart/form-data.
         """
-
-        try:
-            tools_result = await session.list_tools()
-        except Exception as e:
-            logger.warning("Не удалось получить список инструментов MCP: %s", e)
-            return None
-
-        upload_tool = None
-        for tool in tools_result.tools:
-            name = (tool.name or "").lower()
-            desc = (tool.description or "").lower()
-            if "upload" in name or ("file" in name and "upload" in desc):
-                upload_tool = tool
-                break
-
-        if upload_tool is None:
-            logger.warning("Инструмент загрузки файла не найден в реестре MCP — Transcript не будет прикреплён.")
-            return None
-
-        logger.info("Инструмент загрузки файла: %s, схема: %s", upload_tool.name, upload_tool.input_schema)
-
-        file_bytes = file_path.read_bytes()
-        b64_content = base64.b64encode(file_bytes).decode("ascii")
-
-        candidate_args_list = [
-            {"space_id": self.cfg.space_id, "path": str(file_path)},
-            {"space_id": self.cfg.space_id, "file_path": str(file_path)},
-            {"space_id": self.cfg.space_id, "file": str(file_path)},
-            {"space_id": self.cfg.space_id, "file": b64_content, "filename": file_path.name},
-            {"space_id": self.cfg.space_id, "content": b64_content, "filename": file_path.name},
+ 
+        import requests
+ 
+        candidate_bases = [
+            self.cfg.api_base_url,           # из .env, если задан явно
+            "http://127.0.0.1:31007",
+            "http://localhost:31007",
+            "http://127.0.0.1:31009",
+            "http://localhost:31009",
         ]
-
-        for args in candidate_args_list:
-            try:
-                result = await session.call_tool(upload_tool.name, arguments=args)
-                data = self._unwrap(result)
-                file_id = data.get("object", {}).get("id") or data.get("id") or data.get("file_id")
-                if file_id:
-                    logger.info("Файл транскрипта загружен, id=%s", file_id)
-                    return file_id
-            except Exception as e:
-                logger.debug("Попытка загрузки файла с args=%s не удалась: %s", args, e)
+ 
+        headers = {
+            "Authorization": f"Bearer {self.cfg.api_key}",
+            "Anytype-Version": self.cfg.api_version,
+        }
+ 
+        # Находим живой порт
+        working_base = None
+        for base in candidate_bases:
+            if not base:
                 continue
-
-        logger.warning(
-            "Ни один вариант аргументов не подошёл для %s. Проверьте input_schema в логе и поправьте _upload_file.",
-            upload_tool.name,
-        )
-        return None
+            try:
+                r = requests.get(f"{base}/v1/spaces", headers=headers, timeout=3)
+                if r.status_code in (200, 400, 401, 403):
+                    working_base = base
+                    logger.info("Локальный Anytype API найден: %s (статус %s)", base, r.status_code)
+                    break
+            except Exception:
+                continue
+ 
+        if working_base is None:
+            logger.warning(
+                "Локальный Anytype API не отвечает. Укажите ANYTYPE_API_BASE_URL в .env "
+                "(например http://127.0.0.1:31007). Transcript не будет прикреплён."
+            )
+            return None
+ 
+        url = f"{working_base}/v1/spaces/{self.cfg.space_id}/files"
+        try:
+            with open(file_path, "rb") as f:
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    files={"file": (file_path.name, f, "text/markdown")},
+                    timeout=30,
+                )
+ 
+            logger.debug("Upload %s -> %s: %r", url, response.status_code, response.text[:300])
+ 
+            if not response.text.strip():
+                logger.warning("Upload вернул пустой ответ (статус %s).", response.status_code)
+                return None
+ 
+            data = response.json()
+            if response.status_code not in (200, 201):
+                logger.warning("Ошибка загрузки файла: %s %s", response.status_code, data.get("message", data))
+                return None
+ 
+            file_id = (
+                data.get("object_id")
+                or data.get("object", {}).get("id")
+                or data.get("id")
+                or data.get("file_id")
+            )
+            if file_id:
+                logger.info("Файл транскрипта загружен, id=%s", file_id)
+            else:
+                logger.warning("Файл загружен, но id не найден в ответе: %s", data)
+            return file_id
+ 
+        except Exception as e:
+            logger.warning("Не удалось загрузить файл транскрипта: %s: %s", type(e).__name__, e)
+            return None
 
     async def _create_object(self, session, title: str, body: str, api_properties: list[dict]) -> dict:
         args = {
