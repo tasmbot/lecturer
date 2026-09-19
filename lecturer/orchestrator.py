@@ -25,6 +25,32 @@ from lecturer.transcribe.whisper_engine import RealtimeTranscriber
 logger = logging.getLogger(__name__)
 
 
+def _log_full_exception(exc: BaseException, prefix: str = "") -> None:
+    """
+    anyio/MCP заворачивают реальную ошибку в TaskGroup -> ExceptionGroup,
+    из-за чего в логе видно только бесполезное "unhandled errors in a
+    TaskGroup (N sub-exceptions)". Разворачиваем рекурсивно и печатаем
+    каждую настоящую причину с полным traceback.
+    """
+
+    import traceback
+
+    # ExceptionGroup / BaseExceptionGroup появились в Python 3.11.
+    sub_exceptions = getattr(exc, "exceptions", None)
+    if sub_exceptions:
+        for i, sub in enumerate(sub_exceptions, 1):
+            _log_full_exception(sub, prefix=f"{prefix}[{i}] ")
+        return
+
+    logger.error(
+        "%sПричина: %s: %s\n%s",
+        prefix,
+        type(exc).__name__,
+        exc,
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+    )
+
+
 class Pipeline:
     def __init__(self, source_mode: AudioSourceMode = AudioSourceMode.SCREEN):
         self.source_mode = source_mode
@@ -100,6 +126,12 @@ class Pipeline:
         client = OllamaClient()
         summarize_text(text, client=client, output_file=str(self.session.summary_path))
 
+    _AUDIO_SOURCE_TAG = {
+            "screen": "screen",
+            "mic": "mic",
+            "both": "screen+mic",
+        }
+
     def _run_export(self) -> None:
         if not settings.anytype.enabled:
             logger.info("Экспорт в Anytype выключен (LECTURER_ANYTYPE_ENABLED=false).")
@@ -110,8 +142,8 @@ class Pipeline:
             return
 
         properties = LectureNoteProperties(
-            source_type="Lecture",
-            audio_source=self.source_mode.value,
+            source_type="lecture",
+            audio_source=self._AUDIO_SOURCE_TAG.get(self.source_mode.value, self.source_mode.value),
             duration_sec=int(self.session.meta.duration_sec),
             recorded_at=self.session.meta.started_at,
         )
@@ -127,6 +159,12 @@ class Pipeline:
                 )
             )
         except Exception as e:
-            # Экспорт — последний шаг: если он падает (нет сети, не настроен
-            # Anytype), локальный summary.md всё равно остаётся на диске.
-            logger.error("Экспорт в Anytype не удался: %s. summary.md сохранён локально: %s", e, self.session.summary_path)
+            logger.error("Экспорт в Anytype не удался. summary.md сохранён локально: %s", self.session.summary_path)
+            _log_full_exception(e)
+
+            
+            
+    
+
+
+    

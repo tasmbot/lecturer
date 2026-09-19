@@ -23,6 +23,8 @@ import argparse
 import logging
 import signal
 import sys
+import asyncio
+import json
 
 from lecturer.audio.capture import AudioSourceMode
 from lecturer.orchestrator import Pipeline
@@ -35,6 +37,7 @@ _SAMPLE_TRANSCRIPT = """\
 [00:20] Сортировка слиянием стабильна и гарантированно работает за O(n log n), но требует дополнительной памяти.
 [00:28] На практике для небольших массивов часто используют insertion sort как базовый случай в гибридных алгоритмах.
 """
+
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -74,6 +77,96 @@ def cmd_stop(_args: argparse.Namespace) -> int:
     print("Сигнал остановки отправлен, пайплайн завершает суммаризацию и экспорт...")
     return 0
 
+async def _list_tags_async(prop_key: str) -> None:
+    """
+    Через MCP запрашиваем список свойств пространства, находим нужное по key,
+    затем запрашиваем его теги. Выводит точные id/key/name — именно их нужно
+    передавать в multi_select при создании объекта.
+    """
+
+    from mcp import ClientSession
+    from mcp.client.stdio import StdioServerParameters, stdio_client
+
+    from lecturer.config import settings
+
+    cfg = settings.anytype
+    if not cfg.api_key or not cfg.space_id:
+        print("Ошибка: ANYTYPE_API_KEY / ANYTYPE_SPACE_ID не заданы в .env")
+        return
+
+    headers = json.dumps({
+        "Authorization": f"Bearer {cfg.api_key}",
+        "Anytype-Version": cfg.api_version,
+    })
+    server_params = StdioServerParameters(
+        command="npx",
+        args=["-y", "@anyproto/anytype-mcp"],
+        env={**__import__("os").environ, "OPENAPI_MCP_HEADERS": headers},
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            # 1. Получаем все свойства пространства
+            props_result = await session.call_tool(
+                "API-list-properties",
+                arguments={"space_id": cfg.space_id, "limit": 100},
+            )
+            raw = props_result.content[0].text if props_result.content else "{}"
+            props_data = json.loads(raw)
+            properties = props_data.get("data", [])
+
+            if not properties:
+                print("Свойства не найдены. Проверьте ANYTYPE_SPACE_ID.")
+                return
+
+            if not prop_key:
+                # без аргумента — показываем все свойства с форматом
+                print(f"\n{'KEY':<30} {'NAME':<30} FORMAT")
+                print("-" * 70)
+                for p in properties:
+                    print(f"{p.get('key',''):<30} {p.get('name',''):<30} {p.get('format','')}")
+                return
+
+            # 2. Ищем свойство по key или name (регистронезависимо)
+            target = next(
+                (p for p in properties
+                 if p.get("key", "").lower() == prop_key.lower()
+                 or p.get("name", "").lower() == prop_key.lower()),
+                None,
+            )
+            if not target:
+                print(f"Свойство '{prop_key}' не найдено. Запустите без аргумента чтобы увидеть все.")
+                return
+
+            prop_id = target.get("id") or target.get("key")
+            print(f"\nСвойство: {target.get('name')} | key={target.get('key')} | format={target.get('format')}")
+
+            # 3. Получаем теги этого свойства
+            tags_result = await session.call_tool(
+                "API-list-tags",
+                arguments={"space_id": cfg.space_id, "property_id": prop_id, "limit": 100},
+            )
+            raw_tags = tags_result.content[0].text if tags_result.content else "{}"
+            tags_data = json.loads(raw_tags)
+            tags = tags_data.get("data", [])
+
+            if not tags:
+                print("Теги не найдены — создайте их в Anytype (редактор типа → свойство → + добавить опцию).")
+                return
+
+            print(f"\n{'ID':<40} {'KEY':<30} NAME")
+            print("-" * 80)
+            for t in tags:
+                print(f"{t.get('id',''):<40} {t.get('key',''):<30} {t.get('name','')}")
+
+            print(f"\nПередавайте в multi_select: key (3-я колонка) или id (1-я колонка).")
+
+
+def cmd_list_tags(args: argparse.Namespace) -> int:
+    asyncio.run(_list_tags_async(args.property))
+    return 0
 
 def cmd_test_export(args: argparse.Namespace) -> int:
     """
@@ -124,6 +217,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     stop = sub.add_parser("stop", help="остановить текущую запись", parents=[verbose_parent])
     stop.set_defaults(func=cmd_stop)
+
+    list_tags = sub.add_parser(
+        "list-tags",
+        help="показать теги свойства Anytype (нужны для multi_select при создании объекта)",
+        parents=[verbose_parent],
+    )
+    list_tags.add_argument(
+        "property",
+        nargs="?",
+        default="",
+        help="key или name свойства (например: source_type). Без аргумента — список всех свойств.",
+    )
+    list_tags.set_defaults(func=cmd_list_tags)
 
     test_export = sub.add_parser(
         "test-export",

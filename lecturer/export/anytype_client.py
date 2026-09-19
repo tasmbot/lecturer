@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class LectureNoteProperties:
-    source_type: str = "Lecture"       # должен совпадать с key/названием опции select
-    audio_source: str = "Screen"       # screen | mic | both -> опция multi_select
+    source_type: str = "lecture"       # key тега, не name: lecture|meeting|video|other
+    audio_source: str = "screen"       # key тега: screen|mic|screen+mic
     duration_sec: int = 0
     recorded_at: str = ""              # ISO 8601, например "2026-09-08T14:00:00Z"
 
@@ -51,7 +51,7 @@ class AnytypeExporter:
             return []
 
         return [
-            {"key": self.cfg.prop_source_type, "select": properties.source_type},
+            {"key": self.cfg.prop_source_type, "multi_select": [properties.source_type]},
             {"key": self.cfg.prop_audio_source, "multi_select": [properties.audio_source]},
             {"key": self.cfg.prop_duration, "number": properties.duration_sec},
             {"key": self.cfg.prop_recorded_at, "date": properties.recorded_at},
@@ -144,7 +144,7 @@ class AnytypeExporter:
         Загружает файл через сгенерированный из OpenAPI MCP-инструмент.
         Точная схема аргументов этого инструмента не документирована
         публично, поэтому: 1) находим инструмент по имени/пути, 2) логируем
-        его inputSchema (для отладки, в тот же файл, что и errlog),
+        его input_schema (для отладки, в тот же файл, что и errlog),
         3) пробуем несколько правдоподобных наборов аргументов по очереди.
         Если ни один не сработал — пропускаем прикрепление файла, не роняя
         весь экспорт целиком.
@@ -168,7 +168,7 @@ class AnytypeExporter:
             logger.warning("Инструмент загрузки файла не найден в реестре MCP — Transcript не будет прикреплён.")
             return None
 
-        logger.info("Инструмент загрузки файла: %s, схема: %s", upload_tool.name, upload_tool.inputSchema)
+        logger.info("Инструмент загрузки файла: %s, схема: %s", upload_tool.name, upload_tool.input_schema)
 
         file_bytes = file_path.read_bytes()
         b64_content = base64.b64encode(file_bytes).decode("ascii")
@@ -194,7 +194,7 @@ class AnytypeExporter:
                 continue
 
         logger.warning(
-            "Ни один вариант аргументов не подошёл для %s. Проверьте inputSchema в логе и поправьте _upload_file.",
+            "Ни один вариант аргументов не подошёл для %s. Проверьте input_schema в логе и поправьте _upload_file.",
             upload_tool.name,
         )
         return None
@@ -213,7 +213,7 @@ class AnytypeExporter:
             result = await session.call_tool("API-create-object", arguments=args)
             return self._unwrap(result)
         except Exception as e:
-            if self.cfg.type_key == "page":
+            if self.cfg.type_key == "lecture_note":
                 raise
             logger.warning(
                 "Создание объекта типа '%s' со свойствами не удалось (%s). "
