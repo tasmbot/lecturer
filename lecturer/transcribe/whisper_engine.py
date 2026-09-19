@@ -163,7 +163,20 @@ class RealtimeTranscriber:
         total_audio_samples = 0
         start_time = time.time()
 
-        logger.info("Слушаем аудио (устройство=%s)...", self.device_name)
+        # Авто-стоп: сэмплы подряд без речи (сбрасывается при каждом
+        # распознанном фрагменте). 0 = выключено.
+        auto_stop_samples = (
+            int(self.sample_rate * self.cfg.auto_stop_silence_sec)
+            if self.cfg.auto_stop_silence_sec > 0
+            else 0
+        )
+        no_speech_samples = 0
+
+        logger.info(
+            "Слушаем аудио (устройство=%s%s)...",
+            self.device_name,
+            f", авто-стоп через {self.cfg.auto_stop_silence_sec:.0f}с тишины" if auto_stop_samples else "",
+        )
 
         try:
             with sd.InputStream(
@@ -188,6 +201,7 @@ class RealtimeTranscriber:
                         speech_buffer = data.copy() if not recording_speech else np.concatenate([speech_buffer, data])
                         recording_speech = True
                         silence_counter = 0
+                        no_speech_samples = 0  # сбрасываем авто-стоп при любом звуке
 
                         if len(speech_buffer) >= max_segment_samples:
                             self._process_segment(speech_buffer, total_audio_samples, min_speech_samples)
@@ -203,6 +217,16 @@ class RealtimeTranscriber:
                                 speech_buffer = np.array([], dtype=np.float32)
                                 recording_speech = False
                                 silence_counter = 0
+
+                        # Авто-стоп: считаем сэмплы без речи
+                        if auto_stop_samples:
+                            no_speech_samples += len(data)
+                            if no_speech_samples >= auto_stop_samples:
+                                logger.info(
+                                    "Авто-стоп: %.0f секунд без речи — останавливаю запись.",
+                                    self.cfg.auto_stop_silence_sec,
+                                )
+                                self._stop_event.set()
 
         except KeyboardInterrupt:
             logger.info("Остановка по Ctrl+C...")

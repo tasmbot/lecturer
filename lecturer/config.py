@@ -74,6 +74,10 @@ class WhisperConfig:
     min_speech_duration: float = _env_float("LECTURER_MIN_SPEECH_DURATION", 0.3)
     silence_duration: float = _env_float("LECTURER_SILENCE_DURATION", 0.7)
     silence_threshold: float = _env_float("LECTURER_SILENCE_THRESHOLD", 0.01)
+    
+    # Авто-стоп: если не было речи столько секунд — запись останавливается.
+    # 0 = выключено.
+    auto_stop_silence_sec: float = _env_float("LECTURER_AUTO_STOP_SILENCE_SEC", 30.0)
 
 
 @dataclass(frozen=True)
