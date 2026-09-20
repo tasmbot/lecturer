@@ -74,6 +74,10 @@ class WhisperConfig:
     min_speech_duration: float = _env_float("LECTURER_MIN_SPEECH_DURATION", 0.3)
     silence_duration: float = _env_float("LECTURER_SILENCE_DURATION", 0.7)
     silence_threshold: float = _env_float("LECTURER_SILENCE_THRESHOLD", 0.01)
+    
+    # Авто-стоп: если не было речи столько секунд — запись останавливается.
+    # 0 = выключено.
+    auto_stop_silence_sec: float = _env_float("LECTURER_AUTO_STOP_SILENCE_SEC", 30.0)
 
 
 @dataclass(frozen=True)
@@ -117,11 +121,18 @@ class AnytypeConfig:
     # Прикреплять ли сырой transcript.md как файл в свойство "Transcript"
     # (требует лишний запрос на загрузку файла — можно выключить).
     attach_transcript_file: bool = _env_bool("LECTURER_ANYTYPE_ATTACH_TRANSCRIPT", True)
+    # Базовый URL локального Anytype API. Если пусто — автоопределение
+    # по стандартным портам (127.0.0.1:31007, 31009).
+    api_base_url: str = _env("ANYTYPE_API_BASE_URL", "")
+
+    # ID шаблона для создания объектов типа lecture_note.
+    # Узнать: python -m lecturer list-templates
+    template_id: str = _env("ANYTYPE_TEMPLATE_ID", "")
 
     # Куда девать болтливые stderr-логи процесса `npx @anyproto/anytype-mcp`
     # (он при старте печатает полный реестр инструментов) — по умолчанию в
     # файл рядом с сессией, а не в терминал.
-    quiet_mcp_logs: bool = _env_bool("LECTURER_ANYTYPE_QUIET_MCP_LOGS", True)
+    quiet_mcp_logs: bool = _env_bool("LECTURER_ANYTYPE_QUIET_MCP_LOGS", False)
 
 
 @dataclass(frozen=True)

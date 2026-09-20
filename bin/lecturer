@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+    echo "Lecturer is not installed yet."
+    echo
+    echo "Run:"
+    echo "  $PROJECT_DIR/setup.sh"
+    exit 1
+fi
+
+cd "$PROJECT_DIR"
+
+exec "$VENV_PYTHON" -m lecturer "$@"

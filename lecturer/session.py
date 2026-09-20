@@ -26,17 +26,55 @@ from lecturer.config import SessionConfig, settings
 class SessionMeta:
     source_mode: str
     started_at: str
+
+    # --- транскрибация ---
     duration_sec: float = 0.0
     segments_count: int = 0
+    transcript_chars: int = 0
+    words_per_minute: float = 0.0
+    transcription_real_time_sec: float = 0.0
+    rtf: float = 0.0                # real-time factor: transcription_time / duration
+    auto_stopped: bool = False      # остановлен ли авто-стопом по тишине
+
+    # --- суммаризация ---
+    chunks_count: int = 0
+    summarization_sec: float = 0.0
+    summary_chars: int = 0
+    compression_ratio: float = 0.0  # summary_chars / transcript_chars
+
+    # --- экспорт ---
+    export_sec: float = 0.0
+    anytype_object_id: str = ""
+    anytype_transcript_file_id: str = ""
+
     finished_at: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "source_mode": self.source_mode,
             "started_at": self.started_at,
-            "duration_sec": self.duration_sec,
-            "segments_count": self.segments_count,
             "finished_at": self.finished_at,
+            "transcription": {
+                "duration_sec": round(self.duration_sec, 1),
+                "segments_count": self.segments_count,
+                "transcript_chars": self.transcript_chars,
+                "words_per_minute": round(self.words_per_minute, 1),
+                "real_time_sec": round(self.transcription_real_time_sec, 1),
+                "rtf": round(self.rtf, 3),
+                "auto_stopped": self.auto_stopped,
+            },
+            "summarization": {
+                "chunks_count": self.chunks_count,
+                "duration_sec": round(self.summarization_sec, 1),
+                "transcript_chars": self.transcript_chars,
+                "summary_chars": self.summary_chars,
+                "compression_ratio": round(self.compression_ratio, 3),
+            },
+            "export": {
+                "duration_sec": round(self.export_sec, 1),
+                "anytype_object_id": self.anytype_object_id,
+                "anytype_transcript_file_id": self.anytype_transcript_file_id,
+            },
         }
 
 
@@ -68,6 +106,18 @@ class Session:
 
     def save_meta(self) -> None:
         self.meta_path.write_text(json.dumps(self.meta.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def append_to_stats(self) -> None:
+        """
+        Дописывает одну строку JSON в агрегированный ~/Lectures/stats.jsonl —
+        одна строка на сессию, удобно грепать и строить графики.
+        """
+
+        stats_path = self.cfg.archive_dir / "stats.jsonl"
+        self.cfg.archive_dir.mkdir(parents=True, exist_ok=True)
+        record = {"session": self.timestamp, **self.meta.to_dict()}
+        with open(stats_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def archive_outputs(self) -> None:
         """
