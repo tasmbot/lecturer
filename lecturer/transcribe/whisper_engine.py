@@ -91,6 +91,7 @@ class RealtimeTranscriber:
         self._stop_event = threading.Event()
         self.result = TranscriptResult()
         self._model: WhisperModel | None = None
+        self._auto_stopped: bool = False  # True если остановлен по тишине, не вручную
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -226,6 +227,7 @@ class RealtimeTranscriber:
                                     "Авто-стоп: %.0f секунд без речи — останавливаю запись.",
                                     self.cfg.auto_stop_silence_sec,
                                 )
+                                self._auto_stopped = True
                                 self._stop_event.set()
 
         except KeyboardInterrupt:

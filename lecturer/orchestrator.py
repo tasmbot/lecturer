@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timezone
 
 from lecturer.audio.capture import AudioSourceMode, device_name_for_mode
 from lecturer.config import settings
@@ -73,7 +75,9 @@ class Pipeline:
             self.session.archive_outputs()
             self._run_export()
         finally:
+            self.session.meta.finished_at = datetime.now(timezone.utc).isoformat()
             self.session.save_meta()
+            self.session.append_to_stats()
             self.lock.release()
 
         logger.info("Готово. Результаты: %s", self.session.root)
@@ -87,9 +91,7 @@ class Pipeline:
     ) -> Session:
         """
         Для отладки: пропускает запись и транскрибацию, сразу суммаризирует
-        готовый текст и (если не skip_export) шлёт в Anytype. Удобно быстро
-        погонять формат Lecture Note без реальной записи лекции каждый раз.
-        Не требует lock/pid — это не "настоящая" фоновая сессия записи.
+        готовый текст и (если не skip_export) шлёт в Anytype.
         """
 
         self.session.transcript_path.write_text(transcript_text, encoding="utf-8")
@@ -102,7 +104,9 @@ class Pipeline:
         if not skip_export:
             self._run_export()
 
+        self.session.meta.finished_at = datetime.now(timezone.utc).isoformat()
         self.session.save_meta()
+        self.session.append_to_stats()
         logger.info("Готово. Результаты: %s", self.session.root)
         return self.session
 
@@ -110,12 +114,37 @@ class Pipeline:
         device_name = device_name_for_mode(self.source_mode)
         self.transcriber = RealtimeTranscriber(device_name=device_name)
 
+        t0 = time.monotonic()
         result = self.transcriber.start()  # блокирует до stop()
+        transcription_real_time = time.monotonic() - t0
 
         self.session.transcript_path.write_text(result.text, encoding="utf-8")
-        self.session.meta.duration_sec = result.duration_seconds
-        self.session.meta.segments_count = len(result.segments)
-        logger.info("Транскрипт сохранён: %s", self.session.transcript_path)
+
+        # --- метрики транскрибации ---
+        transcript_chars = len(result.text)
+        word_count = len(result.text.split())
+        duration = result.duration_seconds or 1e-6  # защита от деления на 0
+
+        m = self.session.meta
+        m.duration_sec = result.duration_seconds
+        m.segments_count = len(result.segments)
+        m.transcript_chars = transcript_chars
+        m.words_per_minute = round(word_count / (duration / 60), 1)
+        m.transcription_real_time_sec = round(transcription_real_time, 1)
+        m.rtf = round(transcription_real_time / duration, 3)
+        m.auto_stopped = self.transcriber._stop_event.is_set() and not any(
+            # авто-стоп — stop_event взведён, но не через SIGINT:
+            # проверяем, что причина — тишина, а не внешний сигнал
+            # (упрощение: если stop вызван из _run_transcription сам по себе — авто-стоп)
+            True for _ in []
+        )
+        # Более надёжный способ: флаг выставляется самим транскрайбером
+        m.auto_stopped = getattr(self.transcriber, "_auto_stopped", False)
+
+        logger.info(
+            "Транскрипт: %.1f сек. записи | RTF=%.2f | %d слов | %.0f слов/мин",
+            m.duration_sec, m.rtf, word_count, m.words_per_minute,
+        )
 
     def _run_summarization(self) -> None:
         text = self.session.transcript_path.read_text(encoding="utf-8")
@@ -123,14 +152,27 @@ class Pipeline:
             logger.warning("Транскрипт пуст — суммаризация пропущена.")
             return
 
+        t0 = time.monotonic()
         client = OllamaClient()
         summarize_text(text, client=client, output_file=str(self.session.summary_path))
+        summarization_sec = time.monotonic() - t0
 
-    _AUDIO_SOURCE_TAG = {
-            "screen": "screen",
-            "mic": "mic",
-            "both": "screen+mic",
-        }
+        summary_chars = len(self.session.summary_path.read_text(encoding="utf-8")) if self.session.summary_path.exists() else 0
+        transcript_chars = len(text)
+
+        m = self.session.meta
+        m.summarization_sec = round(summarization_sec, 1)
+        m.summary_chars = summary_chars
+        m.transcript_chars = transcript_chars  # на случай run_from_existing_transcript
+        m.compression_ratio = round(summary_chars / transcript_chars, 3) if transcript_chars else 0.0
+
+        logger.info(
+            "Суммаризация: %.1f сек. | %d → %d символов (сжатие %.1f%%)",
+            summarization_sec,
+            transcript_chars,
+            summary_chars,
+            (1 - m.compression_ratio) * 100,
+        )
 
     def _run_export(self) -> None:
         if not settings.anytype.enabled:
@@ -141,16 +183,19 @@ class Pipeline:
             logger.warning("Нет summary.md — экспорт пропущен.")
             return
 
+        _AUDIO_SOURCE_TAG = {"screen": "screen", "mic": "mic", "both": "screen+mic"}
+
         properties = LectureNoteProperties(
             source_type="lecture",
-            audio_source=self._AUDIO_SOURCE_TAG.get(self.source_mode.value, self.source_mode.value),
+            audio_source=_AUDIO_SOURCE_TAG.get(self.source_mode.value, self.source_mode.value),
             duration_sec=int(self.session.meta.duration_sec),
             recorded_at=self.session.meta.started_at,
         )
 
         exporter = AnytypeExporter()
+        t0 = time.monotonic()
         try:
-            asyncio.run(
+            result = asyncio.run(
                 exporter.export_markdown(
                     self.session.summary_path,
                     transcript_path=self.session.transcript_path,
@@ -158,13 +203,15 @@ class Pipeline:
                     log_file=self.session.mcp_log_path,
                 )
             )
+            self.session.meta.export_sec = round(time.monotonic() - t0, 1)
+            self.session.meta.anytype_object_id = (
+                result.get("object", {}).get("id") or result.get("id", "")
+            )
+            self.session.meta.anytype_transcript_file_id = (
+                result.get("transcript_file_id", "")
+            )
+            logger.info("Экспорт завершён за %.1f сек.", self.session.meta.export_sec)
         except Exception as e:
+            self.session.meta.export_sec = round(time.monotonic() - t0, 1)
             logger.error("Экспорт в Anytype не удался. summary.md сохранён локально: %s", self.session.summary_path)
             _log_full_exception(e)
-
-            
-            
-    
-
-
-    
