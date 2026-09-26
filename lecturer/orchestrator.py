@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -183,10 +182,10 @@ class Pipeline:
             logger.warning("Нет summary.md — экспорт пропущен.")
             return
 
-        _AUDIO_SOURCE_TAG = {"screen": "screen", "mic": "mic", "both": "screen+mic"}
+        _AUDIO_SOURCE_TAG = {"screen": "Screen", "mic": "Mic", "both": "Screen+Mic"}
 
         properties = LectureNoteProperties(
-            source_type="lecture",
+            source_type="Lecture",
             audio_source=_AUDIO_SOURCE_TAG.get(self.source_mode.value, self.source_mode.value),
             duration_sec=int(self.session.meta.duration_sec),
             recorded_at=self.session.meta.started_at,
@@ -195,13 +194,11 @@ class Pipeline:
         exporter = AnytypeExporter()
         t0 = time.monotonic()
         try:
-            result = asyncio.run(
-                exporter.export_markdown(
-                    self.session.summary_path,
-                    transcript_path=self.session.transcript_path,
-                    properties=properties,
-                    log_file=self.session.mcp_log_path,
-                )
+            result = exporter.export_markdown(
+                self.session.summary_path,
+                transcript_path=self.session.transcript_path,
+                properties=properties,
+                log_file=self.session.mcp_log_path,
             )
             self.session.meta.export_sec = round(time.monotonic() - t0, 1)
             self.session.meta.anytype_object_id = (

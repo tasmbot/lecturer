@@ -103,6 +103,7 @@ class AnytypeConfig:
     api_key: str = _env("ANYTYPE_API_KEY", "")
     space_id: str = _env("ANYTYPE_SPACE_ID", "")
     api_version: str = _env("ANYTYPE_API_VERSION", "2025-11-08")
+    api_base_url: str = _env("ANYTYPE_API_BASE_URL", "")
     # "page" работает всегда из коробки. "lecture_note" — кастомный тип,
     # который нужно один раз создать в приложении Anytype (Settings -> Types).
     type_key: str = _env("ANYTYPE_TYPE_KEY", "page")
